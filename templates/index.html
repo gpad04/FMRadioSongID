@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>FM Radio Live Stream</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: 50px auto;
+      padding: 20px;
+      text-align: center;
+    }
+    #audioPlayer {
+      width: 100%;
+      margin: 20px 0;
+    }
+    #status {
+      margin: 10px 0;
+      font-weight: bold;
+    }
+    .connected { color: green; }
+    .disconnected { color: red; }
+    .buffering { color: orange; }
+  </style>
+</head>
+<body>
+  <h1>🎧 Live FM Radio Stream</h1>
+  <label for="stationSelect">Choose a station:</label>
+  <select id="stationSelect">
+    <option value="95.7">95.7 FM - Oldies</option>
+    <option value="102.5">102.5 FM - Classic Rock</option>
+    <option value="106.1" selected>106.1 FM - Pop</option>
+    <option value="103.3">103.3 FM - Hip-hop</option>
+  </select>
+  <div id="status" class="disconnected">Disconnected</div>
+  <button id="playButton">▶ Start Radio Stream</button>
+  <button id="identifyButton">▶ Identify the Song! </button>
+  <button id="stopButton" style="display:none;">⏹ Stop Stream</button>
+
+  <div id="identify-result" style="margin-top: 20px;"></div>
+  
+  <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    let audioContext = null;
+    const sampleRate = 48000;
+    const chunkSize = 1024;
+    const audioQueue = [];
+    let scriptNode = null;
+    let isPlaying = false;
+    const statusDiv = document.getElementById('status');
+    const playButton = document.getElementById('playButton');
+    const stopButton = document.getElementById('stopButton');
+    const identifyButton = document.getElementById('identifyButton');
+
+    // Socket events
+    socket.on('connect', () => {
+      statusDiv.textContent = 'Connected - Ready to play';
+      statusDiv.className = 'connected';
+    });
+
+    socket.on('disconnect', () => {
+      statusDiv.textContent = 'Disconnected';
+      statusDiv.className = 'disconnected';
+      stopPlayback();
+    });
+
+    socket.on('identify_result', (data) => {
+      const { title, artist } = data;
+      const resultDiv = document.getElementById('identify-result');
+
+      // Check for unrecognized song cases
+      const isUnknown = !title || title.toLowerCase() === "unknown" || title.toLowerCase().includes("not recognized");
+
+      if (isUnknown) {
+        resultDiv.innerHTML = `
+          <p><strong>Song not Recognized or Ad Break</strong></p>
+        `;
+      } else {
+        resultDiv.innerHTML = `
+          <p><strong>${title}</strong> - ${artist}</p>
+          <audio controls src="/song.wav"></audio>
+        `;
+      }
+    });
+
+    socket.on('audio_chunk', (data) => {
+      if (!isPlaying) return;
+      
+      console.log('Received chunk:', data.byteLength, 'bytes');
+      
+      // Convert binary data to Float32Array
+      const floatData = new Float32Array(data);
+      audioQueue.push(...floatData);
+      
+      // Maintain reasonable buffer size
+      if (audioQueue.length > sampleRate * 2) { // 2 seconds max buffer
+        audioQueue.splice(0, audioQueue.length - sampleRate);
+      }
+    });
+
+    async function startPlayback() {
+      if (scriptNode || !socket.connected) return;
+      
+      try {
+        // Create audio context if needed
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)({
+            sampleRate: sampleRate
+          });
+        }
+        
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        // Create script processor node
+        scriptNode = audioContext.createScriptProcessor(chunkSize, 0, 1);
+        
+        scriptNode.onaudioprocess = (event) => {
+          const outputBuffer = event.outputBuffer.getChannelData(0);
+          
+          for (let i = 0; i < chunkSize; i++) {
+            outputBuffer[i] = audioQueue.length > 0 ? audioQueue.shift() : 0;
+          }
+        };
+        
+        scriptNode.connect(audioContext.destination);
+        isPlaying = true;
+        statusDiv.textContent = 'Playing - Buffering...';
+        statusDiv.className = 'buffering';
+        
+        // Update status when buffer fills
+        setTimeout(() => {
+          if (isPlaying) {
+            statusDiv.textContent = 'Playing';
+            statusDiv.className = 'connected';
+          }
+        }, 1000);
+        
+      } catch (error) {
+        console.error('Failed to start playback:', error);
+        statusDiv.textContent = 'Error starting playback';
+        statusDiv.className = 'disconnected';
+      }
+    }
+
+    function stopPlayback() {
+      if (scriptNode) {
+        scriptNode.disconnect();
+        scriptNode = null;
+      }
+      isPlaying = false;
+      audioQueue.length = 0; // Clear buffer
+      
+      if (socket.connected) {
+        statusDiv.textContent = 'Connected - Stopped';
+        statusDiv.className = 'connected';
+      }
+    }
+
+    // Button events
+    playButton.addEventListener('click', async () => {
+      const freq = parseFloat(document.getElementById('stationSelect').value);
+      socket.emit('start_stream', { center_freq: freq });
+      await startPlayback();
+      playButton.style.display = 'none';
+      stopButton.style.display = 'inline';
+    });
+
+    stopButton.addEventListener('click', () => {
+      stopPlayback();
+      playButton.style.display = 'inline';
+      stopButton.style.display = 'none';
+    });
+
+    identifyButton.addEventListener('click', async () => {
+      const freq = parseFloat(document.getElementById('stationSelect').value);
+      socket.emit('start_identify', { center_freq: freq });
+
+      const resultDiv = document.getElementById('identify-result');
+      resultDiv.innerHTML = '<p>Identifying song... 🎵</p>';
+      playButton.style.display = 'none';
+      stopButton.style.display = 'inline';
+    });
+
+    // Handle page visibility changes
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && isPlaying) {
+        stopButton.click();
+      }
+    });
+  </script>
+</body>
+</html>
